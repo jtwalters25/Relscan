@@ -1,0 +1,39 @@
+name: relscan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate-rules:
+    # Gate 1: the scanner's own rules must pass their harness before they judge anyone else's code.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest -q
+
+  scan:
+    needs: validate-rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Report findings
+        run: python -m relscan samples --format json > findings.json || true
+      - name: Propose autofixes
+        run: python -m relscan samples --diff > autofix.patch || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relscan-results
+          path: |
+            findings.json
+            autofix.patch
+      - name: Gate on errors
+        run: python -m relscan samples
