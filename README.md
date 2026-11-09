@@ -1,65 +1,110 @@
 # relscan
 
-A small reliability scanner for C# services. It finds patterns that cause production incidents, validates its own rules with a test harness, proposes safe autofixes, and runs as a gated CI pipeline.
+A reliability scanner for C# services. It detects code patterns that cause production incidents, validates its own rules with a test harness, proposes safe fixes, and gates CI.
 
-Standalone, clean-room implementation of the ideas behind static-analysis reliability work: **detect, validate, remediate, gate.**
+The pattern: **detect, validate, remediate, gate.**
 
-## Architecture
+This is a clean-room implementation of an approach I use for static analysis and rule validation at work. The domain here is legacy .NET reliability, the kind of issues that surface during a modernization or cloud migration.
 
 ```
-rules.py      Rules are data: id, severity, regex, false-positive filter, optional autofix
-scanner.py    Runs rules over source, maps matches to line numbers, applies fixes right-to-left
-cli.py        relscan <path> [--format json] [--diff] [--fix]   exit 1 on errors
-tests/        Harness: every rule proves itself against fixtures before it can judge real code
-.github/      Pipeline: validate rules -> scan -> publish findings + patch -> gate
+relscan/rules.py      What to detect: rules defined as data
+relscan/scanner.py    How detection and fixing work
+relscan/cli.py        How people and CI use it
+tests/                How the rules prove they are correct
+.github/workflows/    How it runs on every change
+samples/              A legacy-style service to scan
 ```
 
-## Rules
+---
+
+## 1. Rules are data
+
+`relscan/rules.py`
+
+Each rule is a frozen dataclass: an ID, a severity, a pattern, the reason it matters, and two optional hooks.
 
 | ID | Severity | Catches | Why it matters | Autofix |
 |---|---|---|---|---|
 | REL001 | error | `new HttpClient()` per call | Socket exhaustion under load | No |
-| REL002 | error | `.Result`, `.Wait()`, `.GetAwaiter().GetResult()` | Deadlocks, thread pool starvation | No |
-| REL003 | error | `async void` (non event handler) | Unobservable exceptions crash the process | Yes, `async Task` |
-| REL004 | warning | Empty `catch {}` | Failures vanish from logs and alerts | No |
+| REL002 | error | `.Result`, `.Wait()`, `.GetAwaiter().GetResult()` | Thread pool starvation and deadlocks | No |
+| REL003 | error | `async void` outside event handlers | Exceptions cannot be caught, process crashes | Yes |
+| REL004 | warning | Empty `catch {}` | Failures disappear from logs and alerts | No |
 
-## Test harness (rule validation)
+- **`keep`** is an optional false-positive filter. `async void` is acceptable on UI event handlers, so REL003 skips any match where the line contains `EventArgs`.
+- **`fix`** is an optional function that returns replacement text. Only REL003 has one.
+- Adding a rule means one entry in this file plus one fixture folder. No other code changes.
 
-Each rule has a fixture folder, `tests/fixtures/<ID>/`, and the harness enforces a contract:
+## 2. Rules prove themselves before they judge code
 
-- `bad.cs` must trigger the rule (no false negatives)
-- `good.cs` must not trigger it (no false positives)
-- `fixed.cs` must equal the autofix output, and must scan clean
-- Autofix must be idempotent, line numbers must be exact
-- A rule with no fixtures fails the build
+`tests/fixtures/<RULE_ID>/` and `tests/test_rules.py`
 
-Adding a rule = one entry in `rules.py` + one fixture folder. The harness picks it up automatically.
+Every rule must satisfy a contract:
 
-## Pipeline
+| Fixture | Requirement | Guards against |
+|---|---|---|
+| `bad.cs` | Rule must fire | False negatives |
+| `good.cs` | Rule must stay silent | False positives |
+| `fixed.cs` | Autofix output must match exactly, then scan clean | Broken or partial fixes |
 
-1. **validate-rules**: run the harness. If the scanner's rules are wrong, nothing downstream runs.
-2. **scan**: scan the code, publish `findings.json` and `autofix.patch` as artifacts, fail on error-severity findings.
+Additional checks: autofix is idempotent (running it twice changes nothing), line numbers are exact, and a rule with no fixtures fails the build.
 
-## Demo
+Tests are parametrized over the rule list, so a new rule is tested automatically.
 
 ```bash
-python -m pytest -q                  # 15 passing: rules validated
-python -m relscan samples            # 5 findings in a legacy-style service, exit 1
-python -m relscan samples --diff     # proposed remediation as a reviewable patch
-python -m relscan samples --format json
+python3 -m pytest -q        # 15 passed
 ```
 
-## Design decisions and tradeoffs
+**Why this matters:** during development, a comment containing the words "async void" triggered REL003. The `good.cs` fixture caught it. Comment lines are now skipped for every rule. A scanner is only as useful as its false positive rate, because noisy rules get ignored.
 
-- **Regex, not Roslyn.** Fast to build, zero dependencies, easy to read. Cost: no semantic understanding, so `.Result` on a non-Task property is a false positive, and multi-line block comments are not excluded. Next step is a Roslyn analyzer for type-aware rules; the harness and fixtures carry over unchanged.
-- **Autofix only when the fix is mechanical and safe.** `async void` to `async Task` is a signature change with no behavior risk in the method body. HttpClient and sync-over-async fixes need human judgment (DI wiring, async all the way up), so they are report-only.
-- **Fixes are proposed as a patch by default.** `--diff` for review, `--fix` only when explicitly asked. Remediation stays human-approved.
-- **Warnings don't fail the build.** Lets a legacy codebase adopt the scanner without a flag day. Promote rules to error as the backlog burns down.
-- **The harness found a real bug during development:** a comment containing "async void" tripped REL003. The good.cs fixture caught it, and comment lines are now skipped for every rule.
+## 3. Detection and remediation
 
-## What I'd add next
+`relscan/scanner.py`
 
-- Roslyn analyzer port for type-aware rules
-- SARIF output so findings show inline on PRs
-- Baseline file so legacy findings are tracked but only new ones fail the build
-- Bot that opens a PR with the autofix patch
+- **Line numbers:** count newlines before the match offset.
+- **Comment skipping:** a match is ignored if `//` appears earlier on the same line.
+- **Applying fixes right to left:** each fix can change the length of the text. Applying edits from the end of the file backwards keeps every earlier offset valid.
+
+## 4. Running it
+
+`relscan/cli.py` and `samples/ServicePro/WorkOrderService.cs`
+
+```bash
+python3 -m relscan samples                  # 5 findings, exit code 1
+python3 -m relscan samples --diff           # proposed fix as a reviewable patch
+python3 -m relscan samples --format json    # machine-readable output
+python3 -m relscan samples --fix            # apply fixes to disk
+```
+
+- **Exit code** is 1 only when error-severity findings exist. That is the CI gate.
+- **`--diff` by default, `--fix` only on request.** Remediation stays human-reviewed.
+- **Only mechanical fixes are automated.** `async void` to `async Task` is a signature change with no behavior risk. Fixing HttpClient needs dependency injection wiring, and fixing sync-over-async means making the whole call chain async. Those need judgment, so they are report-only.
+- **JSON output** is the integration point for dashboards, APIs, or other tools.
+
+## 5. Pipeline
+
+`.github/workflows/relscan.yml`
+
+```
+validate-rules  ->  scan  ->  publish findings.json + autofix.patch  ->  gate
+```
+
+- `needs: validate-rules` means the scan only runs if the rules pass their harness.
+- The report and patch steps use `|| true` so artifacts are always published, even though the scanner exits 1.
+- The final step has no `|| true`. That step is the gate.
+- Results are build outputs, not committed files. They are downloadable from each run under Artifacts.
+
+A failing scan job is the expected result on the sample: the gate is blocking a service with deadlock and socket exhaustion risks.
+
+## 6. Design decisions
+
+- **Regex instead of Roslyn.** No dependencies, fast to build, easy to read. The cost is no type awareness: `.Result` on something that is not a Task is a false positive, and block comments are not excluded.
+- **Warnings do not fail the build.** A legacy codebase can adopt the scanner without a flag day. Rules get promoted to errors as the backlog burns down.
+- **Contract tests over example tests.** Fixtures define what correct means for each rule, and the harness enforces it for every rule.
+
+## 7. Next steps
+
+- **Roslyn analyzer port** for type-aware rules. Fixtures and harness carry over unchanged.
+- **Baseline file** so existing findings are tracked and only new findings fail the build.
+- **SARIF output** so findings appear inline on pull requests.
+- **Agent-assisted remediation** for fixes that need judgment. An LLM proposes the patch, then it runs through the same harness and rescan before human review. The harness is what makes generated fixes trustworthy.
+- **Peak-load readiness rules** such as outbound calls with no retry policy, no 429 handling, or retries without jitter.
