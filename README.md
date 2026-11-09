@@ -4,7 +4,7 @@ A reliability scanner for C# services. It detects code patterns that cause produ
 
 The pattern: **detect, validate, remediate, gate.**
 
-This is a clean-room implementation of an approach I use for static analysis and rule validation at work. The domain here is legacy .NET reliability, the kind of issues that surface during a modernization or cloud migration.
+This is a clean-room implementation of an approach to static analysis and rule validation. The domain here is legacy .NET reliability, the kind of issues that surface during a modernization or cloud migration.
 
 ```
 relscan/rules.py      What to detect: rules defined as data
