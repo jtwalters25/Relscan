@@ -101,7 +101,20 @@ A failing scan job is the expected result on the sample: the gate is blocking a 
 - **Warnings do not fail the build.** A legacy codebase can adopt the scanner without a flag day. Rules get promoted to errors as the backlog burns down.
 - **Contract tests over example tests.** Fixtures define what correct means for each rule, and the harness enforces it for every rule.
 
-## 7. Next steps
+## 7. Roadmap
+
+### Rolling out across service repos
+
+Today the scanner runs against `samples/` in this repo. Across many services:
+
+- **Versioned package or pipeline template.** Each service repo calls the scanner from its own pipeline (GitHub Actions reusable workflow or Azure Pipelines template) with a few lines of config.
+- **Pinned rule versions.** Each repo pins a version, so a new rule does not break every build at once. Teams upgrade deliberately, and the baseline absorbs new findings.
+- **Changed files on pull requests.** PR scans cover only the files the author touched, so feedback is fast and relevant. A full scan runs on main or on a schedule to track the overall backlog.
+- **Central reporting.** Every run emits JSON to one place for a cross-repo view: which services carry the most risk, and whether the backlog is shrinking.
+
+Tradeoff: the per-repo gate stops new problems at the author, while the central scan tracks existing ones. Both are needed.
+
+### Scanner capabilities
 
 - **Roslyn analyzer port** for type-aware rules. Fixtures and harness carry over unchanged.
 - **Baseline file** so existing findings are tracked and only new findings fail the build.
